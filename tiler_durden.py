@@ -26,7 +26,7 @@ def parse_tcga_code(slidePath):
 
     return case_id, slide_type
 
-def fraction_white_pixels(pilImg, thr=200):
+def fraction_white_pixels(pilImg, thr=200, verbose=False):
     #pil.setflags(write=1)
     img = np.asarray(pilImg.convert('RGB'))#.copy()
     #img.sum(axis=2).max()
@@ -37,11 +37,21 @@ def fraction_white_pixels(pilImg, thr=200):
     whitePixels = (img > [thr, thr, thr]).all(axis=2)
     h,w,_ = img.shape
     whiteFrac = whitePixels.sum() / whitePixels.size
+    if verbose:
+        print(f'White pixels | nonWhite : {whitePixels.size - whitePixels.sum()}  count : {whitePixels.sum()}   total pix : {whitePixels.size}  frac : {whiteFrac}')
     return whiteFrac
 
 
 
+def get_tile_coordinates(slide, tileSize):
+    slideWidth, slideHeight = slide.dimensions
+    tilesX, tilesY = slideWidth//tileSize, slideHeight//tileSize     # grid size
+    xCoords = np.linspace(0, (tilesX-1)*tileSize, tilesX).astype(int)
+    yCoords = np.linspace(0, (tilesY-1)*tileSize, tilesY).astype(int)
 
+    tile_coordinates = np.dstack(np.meshgrid(xCoords, yCoords))      # shape is (tileRows, tileCols, 2)
+    print(tile_coordinates.shape)
+    return tile_coordinates
 
 def tile_WSI(slidePath, tileSize=384):
 
@@ -67,13 +77,7 @@ def tile_WSI(slidePath, tileSize=384):
 
     slide = openslide.OpenSlide(str(slidePath))
 
-    slideWidth, slideHeight = slide.dimensions
-    tilesX, tilesY = slideWidth//tileSize, slideHeight//tileSize     # grid size
-    xCoords = np.linspace(0, (tilesX-1)*tileSize, tilesX).astype(int)
-    yCoords = np.linspace(0, (tilesY-1)*tileSize, tilesY).astype(int)
-
-    tile_coordinates = np.dstack(np.meshgrid(xCoords, yCoords))      # shape is (tileRows, tileCols, 2)
-    print(tile_coordinates.shape)
+    tile_coordinates = get_tile_coordinates(slide, tileSize)
 
     def read_save_tile(job):
         slide = openslide.OpenSlide(str(slidePath))
@@ -84,10 +88,8 @@ def tile_WSI(slidePath, tileSize=384):
             tile = slide.read_region((xPos, yPos), 0, (tileSize, tileSize)).convert('RGB')
             wf = fraction_white_pixels(tile)
             if wf > 0.1: continue
-            # kept_tile_coords.append(((col, row), (xPos, yPos)))
             R = dict(col=col, row=row, xPos=xPos, yPos=yPos)
             records.append(R)
-            #kept_tile_coords.append(R)
             tile.save(str(outPath / f'{col}_{row}.png'))
 
         return records
@@ -101,7 +103,7 @@ def tile_WSI(slidePath, tileSize=384):
     '''
 
     jobs = []
-    for row in trange(tile_coordinates.shape[0]):
+    for row in range(tile_coordinates.shape[0]):
         cols = [col for col in range(tile_coordinates.shape[1])]
         jobs.append((row, cols))
         #for col in range(tile_coordinates.shape[1]):
@@ -118,20 +120,43 @@ def tile_WSI(slidePath, tileSize=384):
     kept_tile_records.sort_values(['col','row']).to_csv(str(csvF), index=False)
 
 
-def test():
-
-    for p in Path('/nfs/tcga/svs_methyl/').glob('*/*.svs'):
-        print(p)
-        break
-
-    slidePath = p
-
+def test(slidePath):
     tile_WSI(slidePath)
+
+def thumb(slidePath):
+    slide = openslide.OpenSlide(slidePath)
+
+    slide = openslide.OpenSlide(str(slidePath))
+    tile_coordinates = get_tile_coordinates(slide, 384)
+    print(tile_coordinates.shape)
+    nRows, nCols, _ = tile_coordinates.shape
+
+    thumb = slide.get_thumbnail((nCols, nRows))
+    print(slide.dimensions, thumb.size)
+
+    fraction_white_pixels(thumb, verbose=True, thr=255//2)
+
+    thr = 255//2
+    thumbArr = np.asarray(thumb.convert('RGB'))  # .copy()
+    foreGroundTiles = (thumbArr < [thr, thr, thr]).all(axis=2)
+    print(foreGroundTiles.shape)
+    tileCoords = np.where(foreGroundTiles)
+    print(tileCoords)
+    rows, cols = tileCoords
+    for row, col in zip(rows, cols):
+        yPos = row*384
+        xPos = col*384
+        print(row, col)
+        tile = slide.read_region((xPos, yPos), 0, (384, 384))
+        print(np.asarray(tile).mean())
+        #tile.save(f'tmp/{row}_{col}.png')
+
 
 def tile_slides():
     paths = list(Path('/nfs/tcga/svs_methyl/').glob('*/*.svs'))
     shuffle(paths)    # allows cheap parallelization, since this is a quick and dirty project
     for slidePath in paths:
+        print(str(slidePath))
         case_id, slide_type = parse_tcga_code(slidePath)
         if slide_type != 'DX1':
             #print(f'Skipping {slide_type}')
@@ -152,6 +177,13 @@ def svs_file_mapping():
     df.to_csv('tcga_cases_files.csv', sep='\t', index=False)
 
 if __name__ == '__main__':
-    #test()
+    #tile_slides()
     #svs_file_mapping()
-    tile_slides()
+
+    for p in Path('/nfs/tcga/svs_methyl/').glob('*/*.svs'):
+        print(p)
+        break
+    slidePath = p
+    test(slidePath)
+    thumb(slidePath)
+
